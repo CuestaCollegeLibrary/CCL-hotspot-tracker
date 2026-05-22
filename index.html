@@ -1945,8 +1945,14 @@ function generateAlmaReport() {
     function buildDesc(h) {
       const base = h.description || '';
       const prefix = base.match(/^[Cc]\.?\s*\d+/)?.[0] || ('c. ' + h.copy_num);
-      const isDeact = h.mb_deactivated || h.sub_status === 'Deactivated' || h.sub_status === 'Blocked';
-      const isExp   = h.sub_status === 'Expired';
+      // Only mark as Deactivated if the app considers this device confirmed-inactive
+      // (on archived or to_be_reactivated tab). Devices on to_deactivate are PENDING
+      // deactivation — not yet confirmed by MB — so don't mark them as Deactivated yet.
+      const tabs = h.tabs || [];
+      const confirmedInactive = tabs.includes('archived') || tabs.includes('to_be_reactivated');
+      const isDeact = confirmedInactive &&
+        (h.mb_deactivated || h.sub_status === 'Deactivated' || h.sub_status === 'Blocked');
+      const isExp   = confirmedInactive && h.sub_status === 'Expired';
       if (isDeact) {
         const expPart = h.exp_date ? ' exp ' + fmtExp(h.exp_date) : '';
         return prefix + expPart + ' (Deactivated)';
@@ -1961,11 +1967,15 @@ function generateAlmaReport() {
       barcode:         h.barcode || '',
       internal_note_1: h.imei   || '',
       internal_note_2: h.phone  || '',
-      internal_note_3: (h.mb_deactivated || h.sub_status === 'Deactivated' || h.sub_status === 'Blocked')
-                         ? 'Deactivated'
-                         : h.sub_status === 'Expired'
-                           ? fmtExp(h.exp_date) + ' (Expired)'
-                           : fmtExp(h.exp_date),
+      internal_note_3: (() => {
+                         const _tabs = h.tabs || [];
+                         const _confirmed = _tabs.includes('archived') || _tabs.includes('to_be_reactivated');
+                         if (_confirmed && (h.mb_deactivated || h.sub_status === 'Deactivated' || h.sub_status === 'Blocked'))
+                           return 'Deactivated';
+                         if (_confirmed && h.sub_status === 'Expired')
+                           return fmtExp(h.exp_date) + ' (Expired)';
+                         return fmtExp(h.exp_date);
+                       })(),
       description: buildDesc(h),
     }));
 
