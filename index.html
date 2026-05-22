@@ -1923,70 +1923,82 @@ function handleMBDeactivationFile(file) {
 // ALMA BULK UPDATE REPORT GENERATOR
 // ============================================================
 function generateAlmaReport() {
-  // Always include ALL hotspots with their current up-to-date info.
-  // Sorted by copy number for easy reading.
   const allHotspots = [...state.hotspots].sort((a, b) => (a.copy_num || 0) - (b.copy_num || 0));
   if (!allHotspots.length) { notify('No devices in inventory', 'error'); return; }
 
   loadSheetJS(() => {
+    // Format date as M/D/YY (no leading zeros, 2-digit year) — matches Alma format
     function fmtExp(dateStr) {
       if (!dateStr) return '';
       try {
         const parts = String(dateStr).split('T')[0].split('-');
         if (parts.length === 3) {
           const yr = parseInt(parts[0]), mo = parseInt(parts[1]), da = parseInt(parts[2]);
+          if (isNaN(yr) || isNaN(mo) || isNaN(da)) return '';
           return mo + '/' + da + '/' + String(yr).slice(-2);
         }
-        const d = new Date(dateStr);
-        return (d.getMonth()+1) + '/' + d.getDate() + '/' + String(d.getFullYear()).slice(-2);
-      } catch { return dateStr; }
+        return '';
+      } catch { return ''; }
     }
 
-    function buildDesc(h) {
-      const base = h.description || '';
-      const prefix = base.match(/^[Cc]\.?\s*\d+/)?.[0] || ('c. ' + h.copy_num);
-      // Only mark as Deactivated if the app considers this device confirmed-inactive
-      // (on archived or to_be_reactivated tab). Devices on to_deactivate are PENDING
-      // deactivation — not yet confirmed by MB — so don't mark them as Deactivated yet.
-      const tabs = h.tabs || [];
-      const confirmedInactive = tabs.includes('archived') || tabs.includes('to_be_reactivated');
-      const isDeact = confirmedInactive &&
-        (h.mb_deactivated || h.sub_status === 'Deactivated' || h.sub_status === 'Blocked');
-      const isExp   = confirmedInactive && h.sub_status === 'Expired';
+    const rows = allHotspots.map(h => {
+      const tabs       = h.tabs || [];
+      const confirmed  = tabs.includes('archived') || tabs.includes('to_be_reactivated');
+      const isDeact    = confirmed && (h.mb_deactivated || h.sub_status === 'Deactivated' || h.sub_status === 'Blocked');
+      const isExpired  = confirmed && h.sub_status === 'Expired';
+      const expFmt     = fmtExp(h.exp_date);
+      const copyLabel  = 'c. ' + (h.copy_num || '');
+      const imei       = h.imei  || '';
+      const phone      = h.phone || '';
+
+      let inventory_number, description, note3;
+
       if (isDeact) {
-        const expPart = h.exp_date ? ' exp ' + fmtExp(h.exp_date) : '';
-        return prefix + expPart + ' (Deactivated)';
+        inventory_number = expFmt ? 'Expires ' + expFmt + ' (Deactivated)' : 'Deactivated';
+        description      = expFmt
+          ? 'Exp ' + expFmt + ' (Deactivated)  IMEI ' + imei + ' / ph# ' + phone
+          : 'Deactivated  IMEI ' + imei + ' / ph# ' + phone;
+        note3            = expFmt ? expFmt + ' (Deactivated)' : 'Deactivated';
+      } else if (isExpired) {
+        inventory_number = expFmt ? 'Expires ' + expFmt + ' (Expired)' : 'Expired';
+        description      = 'Exp ' + expFmt + ' (Expired)  IMEI ' + imei + ' / ph# ' + phone;
+        note3            = expFmt ? expFmt + ' (Expired)' : 'Expired';
+      } else {
+        inventory_number = expFmt ? 'Expires ' + expFmt : '';
+        description      = 'Exp ' + expFmt + '  IMEI ' + imei + ' / ph# ' + phone;
+        note3            = expFmt;
       }
-      if (isExp) {
-        return prefix + ' exp ' + fmtExp(h.exp_date) + ' (Expired)';
-      }
-      return prefix + ' exp ' + fmtExp(h.exp_date);
-    }
 
-    const rows = allHotspots.map(h => ({
-      barcode:         h.barcode || '',
-      internal_note_1: h.imei   || '',
-      internal_note_2: h.phone  || '',
-      internal_note_3: (() => {
-                         const _tabs = h.tabs || [];
-                         const _confirmed = _tabs.includes('archived') || _tabs.includes('to_be_reactivated');
-                         if (_confirmed && (h.mb_deactivated || h.sub_status === 'Deactivated' || h.sub_status === 'Blocked'))
-                           return 'Deactivated';
-                         if (_confirmed && h.sub_status === 'Expired')
-                           return fmtExp(h.exp_date) + ' (Expired)';
-                         return fmtExp(h.exp_date);
-                       })(),
-      description: buildDesc(h),
-    }));
+      return {
+        barcode:                 h.barcode || '',
+        copy_id:                 copyLabel,
+        inventory_number:        inventory_number,
+        alternative_call_number: copyLabel,
+        description:             description,
+        internal_note_1:         imei,
+        internal_note_2:         phone,
+        internal_note_3:         note3,
+      };
+    });
 
-    const ws = XLSX.utils.json_to_sheet(rows);
+    const ws = XLSX.utils.json_to_sheet(rows, {
+      header: ['barcode','copy_id','inventory_number','alternative_call_number',
+               'description','internal_note_1','internal_note_2','internal_note_3']
+    });
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, 'Alma Update');
-    ws['!cols'] = [20, 20, 18, 16, 36].map(w => ({ wch: w }));
+    ws['!cols'] = [18, 10, 22, 10, 42, 18, 16, 18].map(w => ({ wch: w }));
 
     const _t = new Date();
-    const today = _t.getFullYear() + '-' + String(_t.getMonth()+1).padStart(2,'0') + '-' + String(_t.getDate()).padStart(2,'0');
+    const today = _t.getFullYear() + '-' +
+      String(_t.getMonth()+1).padStart(2,'0') + '-' +
+      String(_t.getDate()).padStart(2,'0');
     XLSX.writeFile(wb, 'alma_bulk_update_' + today + '.xlsx');
+
+    // Record in alma report history
+    if (!state.almaReportHistory) state.almaReportHistory = [];
+    state.almaReportHistory.unshift({ date: new Date().toLocaleString(), count: rows.length });
+    if (state.almaReportHistory.length > 5) state.almaReportHistory = state.almaReportHistory.slice(0, 5);
 
     saveState();
     updateBadges();
@@ -1994,6 +2006,7 @@ function generateAlmaReport() {
     notify('Alma report generated — ' + rows.length + ' devices exported', 'success');
   });
 }
+
 
 function updateAlmaMismatchCount() {
   const el = document.getElementById('alma-mismatch-count');
