@@ -2285,6 +2285,27 @@ function previewLISChanges(rows, cols) {
   return { willUpdate, willAdd, procChanges, statusChanges };
 }
 
+// Parse exp date from Alma inventory_number ("Expires M/D/YY") or internal_note_3 ("M/D/YY")
+// Returns YYYY-MM-DD string or '' if not parseable
+function parseAlmaExpDate(invNum, note3) {
+  for (const raw of [invNum, note3]) {
+    if (!raw) continue;
+    // Strip "Expires " prefix and any trailing status like "(Deactivated)"
+    const cleaned = String(raw).replace(/^expires[:\s]*/i, '').replace(/\s*\(.*\)\s*$/i, '').trim();
+    if (!cleaned) continue;
+    // Try M/D/YY or M/D/YYYY
+    const m = cleaned.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
+    if (m) {
+      let yr = parseInt(m[3]);
+      if (yr < 100) yr += 2000;
+      const mo = String(parseInt(m[1])).padStart(2,'0');
+      const da = String(parseInt(m[2])).padStart(2,'0');
+      return yr + '-' + mo + '-' + da;
+    }
+  }
+  return '';
+}
+
 function handleLISFile(file) {
   if (!file) return;
   if (!confirm('⚠️ Important Reminder\n\nPlease make sure you have removed any EOPS/CaFE Hotspots from this file before uploading.\n\nContinue with upload?')) return;
@@ -2294,14 +2315,21 @@ function handleLISFile(file) {
     if (err) { showResult('result-lis', '❌ Error: ' + err, 'error'); return; }
 
     const COL_MAP = {
-      barcode: ['Barcode','barcode','BARCODE'],
-      icn: ['Item Call Number','item call number','ItemCallNumber'],
-      status: ['Status','status'],
-      callnum: ['Call Number','call number','CallNumber'],
-      desc: ['Description','description','DESCRIPTION'],
-      due: ['Due Date','due date','DueDate'],
-      proc: ['Process type','Process Type','process type','ProcessType'],
-      library: ['Library','library'],
+      barcode:       ['Barcode','barcode','BARCODE'],
+      icn:           ['Item Call Number','item call number','ItemCallNumber'],
+      status:        ['Status','status'],
+      callnum:       ['Call Number','call number','CallNumber'],
+      desc:          ['Description','description','DESCRIPTION'],
+      due:           ['Due Date','due date','DueDate'],
+      proc:          ['Process type','Process Type','process type','ProcessType'],
+      library:       ['Library','library'],
+      // New Alma format columns
+      inv_number:    ['inventory_number','Inventory Number','InventoryNumber'],
+      alt_call:      ['alternative_call_number','Alternative Call Number'],
+      note1:         ['internal_note_1','Internal Note 1'],
+      note2:         ['internal_note_2','Internal Note 2'],
+      note3:         ['internal_note_3','Internal Note 3'],
+      copy_id:       ['copy_id','Copy ID','CopyID'],
     };
     function findCol(row, keys) {
       for (const k of keys) if (k in row) return k;
@@ -2393,14 +2421,29 @@ function handleLISFile(file) {
         }
       } else {
         // New device not in our system
+        // Prefer structured Alma columns for IMEI/phone/exp when available
+        const _note1    = cols.note1    ? String(row[cols.note1]    || '').trim() : '';
+        const _note2    = cols.note2    ? String(row[cols.note2]    || '').trim() : '';
+        const _invNum   = cols.inv_number ? String(row[cols.inv_number] || '').trim() : '';
+        const _note3    = cols.note3    ? String(row[cols.note3]    || '').trim() : '';
+        const _copyId   = cols.copy_id  ? String(row[cols.copy_id]  || '').trim() : '';
+        // IMEI: prefer internal_note_1, fall back to Item Call Number extraction
+        const _imei  = (_note1 && /^\d{14,16}$/.test(_note1)) ? _note1 : extractIMEI(icn);
+        // Phone: prefer internal_note_2, fall back to Item Call Number extraction
+        const _phone = _note2 || extractPhone(icn);
+        // Copy num: prefer copy_id ("c. 332" → 332), fall back to description
+        const _copyNum = _copyId ? (parseInt(_copyId.replace(/[^\d]/g,'')) || extractCopyNum(desc)) : extractCopyNum(desc);
+        // Exp date: from MB only after initial add — but on first add, use Alma's inv_number/note3
+        const _expDate = parseAlmaExpDate(_invNum, _note3);
         const newH = {
-          barcode, imei: extractIMEI(icn), imei_verified: true,
-          copy_num: extractCopyNum(desc), phone: extractPhone(icn),
+          barcode, imei: _imei, imei_verified: !!_note1,
+          copy_num: _copyNum, phone: _phone,
           device_type: getDeviceType(icn, cn), program: getProgram(cn),
           description: desc, call_number: cn, lis_status: stat,
-          process_type: proc, due_date: due, sub_status: 'Unknown',
-          exp_date: '', is_overdue: false, days_overdue: 0,
+          process_type: proc, due_date: due, sub_status: _expDate ? 'Active' : 'Unknown',
+          exp_date: _expDate, is_overdue: false, days_overdue: 0,
           in_archive: false, library: lib, tabs: [],
+          pending_renewal: false, sent_for_renewal: false, on_mb_active: null,
         };
         recalcTabs(newH);
         state.hotspots.push(newH);
