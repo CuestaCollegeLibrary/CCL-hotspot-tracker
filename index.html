@@ -2957,6 +2957,19 @@ function handleMBActiveFile(file, resultTarget) {
 
       } else {
         // Device is NOT on MB active list — mark as deactivated
+        // Safety guard: if the device has a future exp_date, its IMEI likely
+        // didn't match due to a format issue. Don't deactivate — it would be wrong.
+        // Only deactivate if exp_date is absent, expired, or already in the past.
+        const _expSafe = (() => {
+          if (!h.exp_date) return true; // no exp date — safe to deactivate
+          try {
+            const _p = h.exp_date.split('-');
+            const _expMs = new Date(parseInt(_p[0]), parseInt(_p[1])-1, parseInt(_p[2])).getTime();
+            return _expMs <= TODAY.getTime(); // only deactivate if exp is past
+          } catch { return true; }
+        })();
+        if (!_expSafe) { skipped++; return; } // future exp_date — skip deactivation
+
         // Only flag if not already deactivated/blocked
         if (h.sub_status !== 'Deactivated' && h.sub_status !== 'Blocked') {
           changes.push(`c.${h.copy_num} (IMEI ${imei}) — <span class="ch-old">${h.sub_status}</span> → <span class="ch-new">Deactivated (not on MB active list)</span>`);
@@ -4739,6 +4752,35 @@ document.getElementById('pw-overlay').innerHTML += `<div id="db-loading" style="
   })();
   // If any events were patched, save immediately so Supabase has the fixed version
   if (_patchMadeChanges) saveState();
+
+  // Recovery: fix devices incorrectly marked Deactivated but with future exp_date.
+  // This happens when an IMEI mismatch causes the MB active list to deactivate
+  // a device that is actually still active.
+  (function fixIncorrectDeactivations() {
+    let fixed = 0;
+    const todayMs = TODAY.getTime();
+    state.hotspots.forEach(h => {
+      if (h.sub_status !== 'Deactivated' && h.sub_status !== 'Blocked') return;
+      if (!h.exp_date) return;
+      try {
+        // Parse exp_date as local date parts to avoid UTC shift
+        const parts = h.exp_date.split('-');
+        const expMs = new Date(parseInt(parts[0]), parseInt(parts[1])-1, parseInt(parts[2])).getTime();
+        if (expMs > todayMs) {
+          // Future exp_date + Deactivated = incorrect deactivation
+          h.sub_status     = 'Active';
+          h.mb_deactivated = false;
+          h.on_mb_active   = null; // reset so next MB upload re-evaluates
+          recalcTabs(h);
+          fixed++;
+        }
+      } catch(e) {}
+    });
+    if (fixed > 0) {
+      console.log('Fixed ' + fixed + ' incorrectly deactivated devices (future exp_date)');
+      _patchMadeChanges = true;
+    }
+  })();
 
   // Restore phone numbers that were corrupted by the phoneCol regex bug.
   // The bug caused phone fields to be overwritten with IMEI values.
