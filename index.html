@@ -2957,18 +2957,18 @@ function handleMBActiveFile(file, resultTarget) {
 
       } else {
         // Device is NOT on MB active list — mark as deactivated
-        // Safety guard: if the device has a future exp_date, its IMEI likely
-        // didn't match due to a format issue. Don't deactivate — it would be wrong.
-        // Only deactivate if exp_date is absent, expired, or already in the past.
-        const _expSafe = (() => {
-          if (!h.exp_date) return true; // no exp date — safe to deactivate
+        // Safety guard: if a non-lost device has a future exp_date and its IMEI
+        // wasn't found, that's likely an IMEI mismatch — don't deactivate it.
+        // Lost/Missing devices can be deactivated regardless of exp_date.
+        const _proc = (h.process_type || '').toLowerCase().trim();
+        const _isLostProc = ['lost','missing','lost and paid','claimed returned'].includes(_proc);
+        if (!_isLostProc && h.exp_date) {
           try {
             const _p = h.exp_date.split('-');
             const _expMs = new Date(parseInt(_p[0]), parseInt(_p[1])-1, parseInt(_p[2])).getTime();
-            return _expMs <= TODAY.getTime(); // only deactivate if exp is past
-          } catch { return true; }
-        })();
-        if (!_expSafe) { skipped++; return; } // future exp_date — skip deactivation
+            if (_expMs > TODAY.getTime()) { skipped++; return; } // future exp, not lost — skip
+          } catch {}
+        }
 
         // Only flag if not already deactivated/blocked
         if (h.sub_status !== 'Deactivated' && h.sub_status !== 'Blocked') {
@@ -4754,23 +4754,26 @@ document.getElementById('pw-overlay').innerHTML += `<div id="db-loading" style="
   if (_patchMadeChanges) saveState();
 
   // Recovery: fix devices incorrectly marked Deactivated but with future exp_date.
-  // This happens when an IMEI mismatch causes the MB active list to deactivate
-  // a device that is actually still active.
+  // ONLY applies to devices on active loan or in-stock (proc=loan or blank) —
+  // Lost/Missing devices with Deactivated sub are correctly deactivated and must NOT be restored.
   (function fixIncorrectDeactivations() {
     let fixed = 0;
     const todayMs = TODAY.getTime();
     state.hotspots.forEach(h => {
       if (h.sub_status !== 'Deactivated' && h.sub_status !== 'Blocked') return;
       if (!h.exp_date) return;
+      // Never restore Lost/Missing/Claimed/etc — their deactivation is intentional
+      const proc = (h.process_type || '').toLowerCase().trim();
+      const isLostProc = ['lost','missing','lost and paid','claimed returned'].includes(proc);
+      if (isLostProc) return;
       try {
-        // Parse exp_date as local date parts to avoid UTC shift
         const parts = h.exp_date.split('-');
         const expMs = new Date(parseInt(parts[0]), parseInt(parts[1])-1, parseInt(parts[2])).getTime();
         if (expMs > todayMs) {
-          // Future exp_date + Deactivated = incorrect deactivation
+          // Future exp_date + Deactivated + not lost/missing = incorrect deactivation
           h.sub_status     = 'Active';
           h.mb_deactivated = false;
-          h.on_mb_active   = null; // reset so next MB upload re-evaluates
+          h.on_mb_active   = null;
           recalcTabs(h);
           fixed++;
         }
