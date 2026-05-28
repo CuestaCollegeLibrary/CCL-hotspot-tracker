@@ -2902,19 +2902,18 @@ function handleMBActiveFile(file, resultTarget) {
       if (!imei || imei.length < 14) { skipped++; return; }
 
       if (activeIMEIs.has(imei)) {
-        // Device IS on MB active list — update exp date and phone if available
+        // Device IS on MB active list
         const mbRow = mbRowByIMEI[imei];
         let changed = false;
 
+        // Update exp_date from MB file
         if (dateCol && mbRow) {
           let newExp = '';
           try {
             const raw = String(mbRow[dateCol]);
-            // Try YYYY-MM-DD first
             if (/^\d{4}-\d{2}-\d{2}/.test(raw)) {
               newExp = raw.split('T')[0];
             } else {
-              // Parse and convert to local date string to avoid UTC shift
               const d = new Date(raw);
               if (!isNaN(d)) {
                 newExp = d.getFullYear() + '-' +
@@ -2930,28 +2929,35 @@ function handleMBActiveFile(file, resultTarget) {
           }
         }
 
+        // Update phone from MB file
         if (phoneCol && mbRow && mbRow[phoneCol]) {
           const ph = String(mbRow[phoneCol]).trim();
           if (ph && ph !== h.phone) { h.phone = ph; changed = true; }
         }
 
-        // If it was previously MB-deactivated, clear that flag
+        // Device is confirmed active by MB — always set sub_status correctly.
+        // Never use getSubStatus() or description parsing here.
+        // MB is the sole source of truth: if it's on the active list, it's Active
+        // (unless the exp_date is in the past, in which case it's Expired).
+        const wasDeact = h.mb_deactivated || h.sub_status === 'Deactivated' || h.sub_status === 'Blocked';
+        let correctSub = 'Active';
+        if (h.exp_date) {
+          try {
+            const _p = h.exp_date.split('-');
+            const expMs = new Date(parseInt(_p[0]), parseInt(_p[1])-1, parseInt(_p[2])).getTime();
+            correctSub = expMs < TODAY.getTime() ? 'Expired' : 'Active';
+          } catch {}
+        }
+        if (h.sub_status !== correctSub) {
+          h.sub_status = correctSub;
+          changed = true;
+        }
         if (h.mb_deactivated) {
           h.mb_deactivated = false;
-          // Restore sub_status from description
-          h.sub_status = getSubStatus(h.description);
-          changes.push(`c.${h.copy_num} — <span class="ch-new">RESTORED</span> (now found on MB active list)`);
+          changes.push(`c.${h.copy_num} — <span class="ch-new">RESTORED</span> (found on MB active list)`);
           changed = true;
-        } else if (changed) {
-          // Re-derive sub_status in case exp date changed
-          if (!/deactivated|blocked/i.test(h.description)) {
-            h.sub_status = getSubStatus(h.description.replace(/exp [\d/]+/, 'exp ' + (h.exp_date || '')));
-            if (h.exp_date) {
-              const expDt = new Date(h.exp_date);
-              h.sub_status = expDt < TODAY ? 'Expired' : 'Active';
-            }
-          }
         }
+        h.on_mb_active = true;
 
         if (changed) { recalcTabs(h); updated++; }
 
